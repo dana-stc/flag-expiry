@@ -214,6 +214,16 @@ Requirements:
   built from the check call (`isOn` by default), `!`, `&&`, `||` and parentheses. Flags
   stored in variables, passed as arguments or used in a `switch` are reported and left for
   manual cleanup.
+- Checks are matched by the string literal in the call (`isOn("new-checkout")`), not by a
+  constant, and only inside the element carrying the `@Flag`. A check of the same flag
+  elsewhere is reported and the flag is left for manual cleanup.
+- Code made unreachable by the kept branch is detected only after a trailing `return`,
+  `throw`, `break`, `continue` or an `if`/`else` that ends in one of them. Other shapes
+  (loops, `switch`, `try`) can leave code that does not compile; `VERIFY_CMD` then skips
+  the flag.
+- `scripts/flag-cleanup.sh` only recognises the default `isOn` check method.
+- Each flag gets its own PR from the base branch. Flags that touch the same lines conflict:
+  merge one, then rerun the workflow for the rest.
 - Cleanup does not touch non-Java files (config, flag provider definitions). It runs
   `VERIFY_CMD` before opening a PR, but only your CI on the PR (see the token note above)
   is the real safety net.
