@@ -129,12 +129,36 @@ tasks.withType(JavaCompile) {
 - Use CI warnings as a signal: grep the build log for `expires in` to post a weekly
   summary of upcoming expirations per owner.
 
+## Automatic cleanup PRs
+
+Expired flags can be removed by a deterministic tool that opens one pull
+request per flag.
+
+```bash
+mvn compile
+java -cp target/classes io.flagexpiry.cleanup.FlagCleanup list   --src src
+java -cp target/classes io.flagexpiry.cleanup.FlagCleanup remove --src src --flag new-checkout
+```
+
+`remove` deletes the `@Flag` annotation, rewrites every `if (flags.isOn("name"))` /
+ternary check to the **flag-on** behaviour, drops the dead branch (and code made
+unreachable by an early `return`), and removes the unused import. The check method name is
+`isOn` by default; use `--check-methods isOn,isEnabled` for others.
+
+If a check is not a plain `if` or ternary (for example `isOn("x") && other`), the tool
+exits with code 2 and changes nothing, so that flag needs manual cleanup.
+
+`scripts/flag-cleanup.sh` runs this for every expired flag: it creates a
+`flag-cleanup/<name>` branch, commits, pushes and runs `gh pr create`, skipping flags that
+already have a branch. `.github/workflows/flag-cleanup.yml` runs it every Monday (or on
+demand). The PR is never merged automatically: a human confirms that flag-on is what
+shipped.
+
 ## Limitations
 
 - Checks run at compile time on source code only. Flags that exist solely in your flag
   provider's dashboard (not annotated in code) are not covered.
-- The processor does not remove code for you. Automatic cleanup (for example an
-  OpenRewrite recipe that deletes the flag and the dead branch) is a planned extension.
+- The processor itself never edits code; removal is a separate tool (see below).
 - Dates are compared against the build machine's local date.
 
 ## Building from source
