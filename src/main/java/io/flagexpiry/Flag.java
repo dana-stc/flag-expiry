@@ -29,4 +29,11 @@ public @interface Flag {
 
     /** Optional free text: why the flag exists, ticket link, removal instructions. */
     String note() default "";
+
+    /**
+     * The value the flag is permanently resolved to. Only used by the cleanup tool: when the
+     * flag expires, the branch for this value is kept and the other one is deleted. Use
+     * {@code false} for a flag that was rolled back.
+     */
+    boolean resolvedTo() default true;
 }
