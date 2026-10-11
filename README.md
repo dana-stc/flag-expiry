@@ -68,13 +68,13 @@ Owner: team-payments. Remove the flag and its dead branch.
 
 ## The `@Flag` annotation
 
-| Attribute | Required | Description                                                     |
-|-----------|----------|-----------------------------------------------------------------|
-| `name`    | yes      | Flag key, as used in your flag provider                         |
-| `owner`   | yes      | Team or person responsible for removing it                      |
-| `expires` | yes      | ISO date `yyyy-MM-dd`, valid through that day                   |
-| `note`    | no       | Free text: reason, ticket, removal instructions                 |
-| `resolvedTo` | no    | `true` (default) or `false`: which behaviour the cleanup tool keeps when the flag expires |
+| Attribute    | Required | Description                                                  |
+|--------------|----------|--------------------------------------------------------------|
+| `name`       | yes      | Flag key, as used in your flag provider                      |
+| `owner`      | yes      | Team or person responsible for removing it                   |
+| `expires`    | yes      | ISO date `yyyy-MM-dd`, valid through that day                |
+| `note`       | no       | Free text: reason, ticket, removal instructions              |
+| `resolvedTo` | no       | `true` (default) or `false`: the behaviour the [cleanup tool](#automatic-cleanup-prs) keeps once the flag has expired |
 
 It can be placed on classes, methods, fields, constructors and local variables.
 Retention is `RUNTIME`, so you can also read flags via reflection (for example to build
@@ -145,14 +145,15 @@ java -cp target/classes io.flagexpiry.cleanup.FlagCleanup list   --src src [--to
 java -cp target/classes io.flagexpiry.cleanup.FlagCleanup remove --src src --flag new-checkout
 ```
 
-`list` prints one tab-separated line (name, owner, expires, resolvedTo, note) per flag whose date has
-passed. `--today` previews a future date, like `flagexpiry.today` for the compiler. Run it
-with a JDK (it uses the compiler API), not just a JRE.
+`list` prints one tab-separated line (name, owner, expires, resolvedTo, note) per flag
+whose date has passed. `--today` previews a future date, like `flagexpiry.today` for the
+compiler. Run it with a JDK (it uses the compiler API), not just a JRE.
 
 `remove` deletes the `@Flag` annotation, rewrites every `if (flags.isOn("name"))` /
-ternary check to the behaviour of `resolvedTo` (the **flag-on** branch by default), drops the dead branch (and code made
-unreachable by an early `return`), and removes the unused import. The check method name is
-`isOn` by default; use `--check-methods isOn,isEnabled` for others.
+ternary check to the behaviour of `resolvedTo` (the **flag-on** branch by default), drops
+the dead branch (and code made unreachable by an early `return`), and removes the unused
+import. The check method name is `isOn` by default; use `--check-methods isOn,isEnabled`
+for others.
 
 A flag that was rolled back is removed the same way: set `resolvedTo = false` on its
 `@Flag` and the flag-off branch is kept instead.
@@ -178,9 +179,10 @@ and changes nothing, so that flag needs manual cleanup.
 `scripts/flag-cleanup.sh` runs this for every expired flag: it creates a
 `flag-cleanup/<name>` branch, runs your build and tests on the result, commits, pushes and
 runs `gh pr create`. Flags that already have a branch, need manual cleanup or break the
-build are skipped and reported. `.github/workflows/flag-cleanup.yml` runs it every Monday (or on
-demand. The PR is never merged automatically: a human confirms that the kept behaviour
-(on, or off with `resolvedTo = false`) is what shipped.
+build are skipped and reported. The script always uses the default `isOn` check method.
+`.github/workflows/flag-cleanup.yml` runs it every Monday (or on demand). The PR is never
+merged automatically: a human confirms that the kept behaviour (on, or off with
+`resolvedTo = false`) is what shipped.
 
 To use it in another project, copy the script and workflow and point the script at your
 code with `SRC_DIR` (default `src`) and at the flag-expiry classes or jar with `CLASSES`
