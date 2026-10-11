@@ -22,6 +22,8 @@ import javax.tools.Diagnostic.Kind;
  *   <li>{@code flagexpiry.failOnExpired} - report expired flags as errors (default true)</li>
  *   <li>{@code flagexpiry.today} - override today's date, {@code yyyy-MM-dd} (for tests)</li>
  * </ul>
+ * Each option can also be set with an environment variable ({@code FLAGEXPIRY_WARN_DAYS},
+ * {@code FLAGEXPIRY_FAIL_ON_EXPIRED}, {@code FLAGEXPIRY_TODAY}); a {@code -A} option wins.
  */
 @SupportedAnnotationTypes("io.flagexpiry.Flag")
 @SupportedOptions({FlagExpiryProcessor.OPT_WARN_DAYS, FlagExpiryProcessor.OPT_FAIL,
@@ -84,6 +86,8 @@ public final class FlagExpiryProcessor extends AbstractProcessor {
     }
 
     private String option(String key) {
-        return processingEnv.getOptions().get(key);
+        String value = processingEnv.getOptions().get(key);
+        return value != null ? value : System.getenv(key.replace('.', '_')
+                .replaceAll("([a-z])([A-Z])", "$1_$2").toUpperCase(java.util.Locale.ROOT));
     }
 }

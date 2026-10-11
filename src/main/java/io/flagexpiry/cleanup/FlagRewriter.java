@@ -2,6 +2,7 @@ package io.flagexpiry.cleanup;
 
 import com.sun.source.tree.AnnotationTree;
 import com.sun.source.tree.AssignmentTree;
+import com.sun.source.tree.BinaryTree;
 import com.sun.source.tree.BlockTree;
 import com.sun.source.tree.ClassTree;
 import com.sun.source.tree.CompilationUnitTree;
@@ -49,7 +50,7 @@ import javax.tools.ToolProvider;
  */
 final class FlagRewriter {
 
-    record Found(String name, String owner, String expires, String note, int line) {}
+    record Found(String name, String owner, String expires, String note, boolean resolvedTo, int line) {}
 
     record Result(String source, List<String> problems) {}
 
@@ -85,7 +86,7 @@ final class FlagRewriter {
         return annotated(parse(source)).stream().map(Annotated::info).toList();
     }
 
-    /** Removes every flag named {@code name} from the source. */
+    /** Removes every flag named {@code name} from the source, keeping the branch of its {@code resolvedTo} value. */
     static Result remove(String source, String name, Set<String> checks) {
         String src = source;
         for (int i = 0; i < 10_000; i++) {
@@ -94,7 +95,7 @@ final class FlagRewriter {
             if (target == null) {
                 break;
             }
-            Finder finder = new Finder(src, p, name, checks);
+            Finder finder = new Finder(src, p, name, checks, target.info().resolvedTo());
             finder.scan(p.trees().getPath(p.cu(), target.element()), null);
             Edit edit = finder.edit;
             if (edit == null) {
@@ -172,13 +173,15 @@ final class FlagRewriter {
                     Map<String, String> args = new HashMap<>();
                     for (ExpressionTree arg : a.getArguments()) {
                         if (arg instanceof AssignmentTree as && as.getVariable() instanceof IdentifierTree id
-                                && as.getExpression() instanceof LiteralTree lt && lt.getValue() instanceof String s) {
-                            args.put(id.getName().toString(), s);
+                                && as.getExpression() instanceof LiteralTree lt
+                                && (lt.getValue() instanceof String || lt.getValue() instanceof Boolean)) {
+                            args.put(id.getName().toString(), lt.getValue().toString());
                         }
                     }
                     if (args.containsKey("name")) {
                         found.add(new Annotated(a, element, new Found(args.get("name"), args.getOrDefault("owner", ""),
-                                args.getOrDefault("expires", ""), args.getOrDefault("note", ""), p.line(a))));
+                                args.getOrDefault("expires", ""), args.getOrDefault("note", ""),
+                                !"false".equals(args.get("resolvedTo")), p.line(a))));
                     }
                 }
             }
@@ -187,21 +190,6 @@ final class FlagRewriter {
     }
 
     // ---------------------------------------------------------------- flag checks
-
-    /** Returns TRUE for {@code isOn("name")}, FALSE for {@code !isOn("name")}, null otherwise. */
-    private static Boolean polarity(ExpressionTree cond, String name, Set<String> checks) {
-        if (cond instanceof ParenthesizedTree pt) {
-            return polarity(pt.getExpression(), name, checks);
-        }
-        if (cond instanceof UnaryTree ut && ut.getKind() == Tree.Kind.LOGICAL_COMPLEMENT) {
-            Boolean inner = polarity(ut.getExpression(), name, checks);
-            return inner == null ? null : !inner;
-        }
-        if (cond instanceof MethodInvocationTree m && isCheck(m, name, checks)) {
-            return Boolean.TRUE;
-        }
-        return null;
-    }
 
     private static boolean isCheck(MethodInvocationTree m, String name, Set<String> checks) {
         String method;
@@ -223,7 +211,7 @@ final class FlagRewriter {
             public Void visitMethodInvocation(MethodInvocationTree m, Void v) {
                 if (isCheck(m, name, checks)) {
                     out.add("line " + p.line(m) + ": cannot remove automatically: " + m
-                            + " (only plain if / ternary checks are supported)");
+                            + " (only if / ternary conditions made of !, && and || are supported)");
                 }
                 return super.visitMethodInvocation(m, v);
             }
@@ -238,21 +226,26 @@ final class FlagRewriter {
         private final Parsed p;
         private final String name;
         private final Set<String> checks;
+        private final boolean value;
         Edit edit;
 
-        Finder(String src, Parsed p, String name, Set<String> checks) {
+        Finder(String src, Parsed p, String name, Set<String> checks, boolean value) {
             this.src = src;
             this.p = p;
             this.name = name;
             this.checks = checks;
+            this.value = value;
         }
 
         @Override
         public Void visitIf(IfTree t, Void v) {
             if (edit == null) {
-                Boolean on = polarity(t.getCondition(), name, checks);
-                if (on != null) {
-                    edit = ifEdit(t, on, getCurrentPath().getParentPath().getLeaf());
+                ExpressionTree cond = t.getCondition() instanceof ParenthesizedTree pt ? pt.getExpression() : t.getCondition();
+                Ev ev = containsCheck(cond) ? tryEval(cond) : null;
+                if (ev != null) {
+                    edit = ev.constant() != null
+                            ? ifEdit(t, ev.constant(), getCurrentPath().getParentPath().getLeaf())
+                            : new Edit(p.start(cond), p.end(cond), ev.text());
                     return null;
                 }
             }
@@ -261,23 +254,101 @@ final class FlagRewriter {
 
         @Override
         public Void visitConditionalExpression(ConditionalExpressionTree t, Void v) {
-            if (edit == null) {
-                Boolean on = polarity(t.getCondition(), name, checks);
-                if (on != null) {
-                    ExpressionTree keep = on ? t.getTrueExpression() : t.getFalseExpression();
-                    edit = new Edit(p.start(t), p.end(t), slice(keep));
+            if (edit == null && containsCheck(t.getCondition())) {
+                Ev ev = tryEval(t.getCondition());
+                if (ev != null) {
+                    if (ev.constant() != null) {
+                        ExpressionTree keep = ev.constant() ? t.getTrueExpression() : t.getFalseExpression();
+                        edit = new Edit(p.start(t), p.end(t), slice(keep));
+                    } else {
+                        edit = new Edit(p.start(t.getCondition()), p.end(t.getCondition()), ev.text());
+                    }
                     return null;
                 }
             }
             return super.visitConditionalExpression(t, v);
         }
 
+        /** Constant when the condition is decided, otherwise the condition without the flag. */
+        private record Ev(Boolean constant, String text) {}
+
+        private static final class Unsupported extends RuntimeException {
+            Unsupported() {
+                super(null, null, false, false);
+            }
+        }
+
+        private Ev tryEval(ExpressionTree cond) {
+            try {
+                return eval(cond);
+            } catch (Unsupported e) {
+                return null;
+            }
+        }
+
+        private boolean containsCheck(Tree tree) {
+            return !checkCalls(p, tree, name, checks).isEmpty();
+        }
+
+        /** Replaces the flag by its resolved value in {@code !}, {@code &&}, {@code ||} and parentheses. */
+        private Ev eval(ExpressionTree e) {
+            if (!containsCheck(e)) {
+                return new Ev(null, slice(e));
+            }
+            if (e instanceof ParenthesizedTree pt) {
+                Ev inner = eval(pt.getExpression());
+                return inner.constant() != null ? inner : new Ev(null, "(" + inner.text() + ")");
+            }
+            if (e instanceof UnaryTree ut && ut.getKind() == Tree.Kind.LOGICAL_COMPLEMENT) {
+                Ev inner = eval(ut.getExpression());
+                return inner.constant() != null ? new Ev(!inner.constant(), null) : new Ev(null, "!" + inner.text());
+            }
+            if (e instanceof MethodInvocationTree m && isCheck(m, name, checks)) {
+                return new Ev(value, null);
+            }
+            if (e instanceof BinaryTree b && (b.getKind() == Tree.Kind.CONDITIONAL_AND
+                    || b.getKind() == Tree.Kind.CONDITIONAL_OR)) {
+                boolean and = b.getKind() == Tree.Kind.CONDITIONAL_AND;
+                Ev l = eval(b.getLeftOperand());
+                Ev r = eval(b.getRightOperand());
+                if (l.constant() != null) {
+                    // true && r -> r, false && r -> false, true || r -> true, false || r -> r
+                    return l.constant() == and ? r : l;
+                }
+                if (r.constant() != null) {
+                    if (r.constant() == and) {
+                        return l;           // l && true -> l, l || false -> l
+                    }
+                    if (isPure(b.getLeftOperand())) {
+                        return r;           // l && false -> false, l || true -> true
+                    }
+                    throw new Unsupported(); // would drop a call with possible side effects
+                }
+                return new Ev(null, l.text() + (and ? " && " : " || ") + r.text());
+            }
+            throw new Unsupported();
+        }
+
+        /** Operands that can be dropped without losing side effects. */
+        private static boolean isPure(ExpressionTree e) {
+            if (e instanceof ParenthesizedTree pt) {
+                return isPure(pt.getExpression());
+            }
+            if (e instanceof UnaryTree ut && ut.getKind() == Tree.Kind.LOGICAL_COMPLEMENT) {
+                return isPure(ut.getExpression());
+            }
+            if (e instanceof MemberSelectTree ms) {
+                return isPure(ms.getExpression());
+            }
+            return e instanceof IdentifierTree || e instanceof LiteralTree;
+        }
+
         private String slice(Tree t) {
             return src.substring(p.start(t), p.end(t));
         }
 
-        private Edit ifEdit(IfTree t, boolean on, Tree parent) {
-            StatementTree keep = on ? t.getThenStatement() : t.getElseStatement();
+        private Edit ifEdit(IfTree t, boolean keepThen, Tree parent) {
+            StatementTree keep = keepThen ? t.getThenStatement() : t.getElseStatement();
             int start = p.start(t);
             int end = p.end(t);
             if (!(parent instanceof BlockTree block)) {
@@ -322,6 +393,10 @@ final class FlagRewriter {
             if (s instanceof BlockTree b) {
                 return b.getStatements().isEmpty() || completesNormally(b.getStatements().get(b.getStatements().size() - 1));
             }
+            if (s instanceof IfTree i) {
+                return i.getElseStatement() == null || completesNormally(i.getThenStatement())
+                        || completesNormally(i.getElseStatement());
+            }
             return switch (s.getKind()) {
                 case RETURN, THROW, BREAK, CONTINUE -> false;
                 default -> true;
@@ -340,6 +415,9 @@ final class FlagRewriter {
             }
             if (lines.isEmpty()) {
                 return "";
+            }
+            if (lines.size() == 1) {
+                return lines.get(0).strip();
             }
             int lineStart = src.lastIndexOf('\n', ifStart - 1) + 1;
             int ifIndent = indent(src.substring(lineStart, src.indexOf('\n', ifStart) < 0 ? src.length() : src.indexOf('\n', ifStart)));

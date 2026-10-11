@@ -23,8 +23,8 @@ import java.util.stream.Stream;
  * remove --src DIR --flag NAME [--check-methods isOn,isEnabled]
  * </pre>
  *
- * <p>{@code list} prints one tab separated line per expired flag: name, owner, expires, note.
- * {@code remove} keeps the "on" branch of every check of the flag. Exit codes: 0 done,
+ * <p>{@code list} prints one tab separated line per expired flag: name, owner, expires, resolvedTo, note.
+ * {@code remove} keeps the branch matching the flag's {@code resolvedTo} (default true). Exit codes: 0 done,
  * 1 flag not found, 2 needs manual cleanup (nothing is written), 64 bad usage.
  */
 public final class FlagCleanup {
@@ -77,7 +77,7 @@ public final class FlagCleanup {
             }
         }
         expired.values().forEach(f -> System.out.println(String.join("\t", f.name(), f.owner(), f.expires(),
-                f.note().replaceAll("\\s+", " "))));
+                String.valueOf(f.resolvedTo()), f.note().replaceAll("\\s+", " "))));
     }
 
     /** Returns the process exit code. */
