@@ -114,7 +114,8 @@ tasks.withType(JavaCompile) {
 
 1. **Add the flag with a realistic date.** Pick the rollout end plus a buffer, not "never".
 2. **Roll out and finish.** When the flag is 100% on, remove the flag, the annotation
-   and the dead branch in one PR.
+   and the dead branch in one PR. Once the flag has expired, the
+   [cleanup workflow](#automatic-cleanup-prs) opens this PR for you.
 3. **Need more time?** Move `expires` forward in a PR. The change is reviewed and visible
    in git history, which makes extensions a conscious decision.
 4. **Adopting in an existing codebase?** Start with `-Aflagexpiry.failOnExpired=false`
@@ -136,9 +137,13 @@ request per flag.
 
 ```bash
 mvn compile
-java -cp target/classes io.flagexpiry.cleanup.FlagCleanup list   --src src
+java -cp target/classes io.flagexpiry.cleanup.FlagCleanup list   --src src [--today 2026-12-02]
 java -cp target/classes io.flagexpiry.cleanup.FlagCleanup remove --src src --flag new-checkout
 ```
+
+`list` prints one tab-separated line (name, owner, expires, note) per flag whose date has
+passed. `--today` previews a future date, like `flagexpiry.today` for the compiler. Run it
+with a JDK (it uses the compiler API), not just a JRE.
 
 `remove` deletes the `@Flag` annotation, rewrites every `if (flags.isOn("name"))` /
 ternary check to the **flag-on** behaviour, drops the dead branch (and code made
@@ -154,17 +159,38 @@ already have a branch. `.github/workflows/flag-cleanup.yml` runs it every Monday
 demand). The PR is never merged automatically: a human confirms that flag-on is what
 shipped.
 
+To use it in another project, copy the script and workflow and point the script at your
+code with `SRC_DIR` (default `src`) and at the flag-expiry classes or jar with `CLASSES`
+(default `target/classes`). `BASE` sets the target branch (default `main`) and
+`DRY_RUN=1` only prints what would happen. Requirements:
+
+- `gh` authenticated (the workflow uses `GITHUB_TOKEN`) and JDK 17+.
+- In the repository settings, enable *Allow GitHub Actions to create and approve pull
+  requests*.
+- PRs opened with `GITHUB_TOKEN` do **not** trigger other workflows. If you want your CI
+  to run on the cleanup PRs, pass a personal access token or GitHub App token as
+  `GH_TOKEN` instead.
+
 ## Limitations
 
 - Checks run at compile time on source code only. Flags that exist solely in your flag
   provider's dashboard (not annotated in code) are not covered.
-- The processor itself never edits code; removal is a separate tool (see below).
+- The processor itself never edits code; removal is a separate tool (see
+  [Automatic cleanup PRs](#automatic-cleanup-prs)).
 - Dates are compared against the build machine's local date.
+- Automatic cleanup always keeps the flag-on behaviour, so a flag that was rolled back
+  must be removed by hand.
+- Automatic cleanup only understands plain `if` statements and ternaries on a single
+  check call (`isOn` by default). Anything else (`&&`/`||` combinations, flags stored in
+  variables, `switch`) is reported and left for manual cleanup.
+- Cleanup does not touch non-Java files (config, flag provider definitions) and does not
+  run your tests; your CI must run on the PR (see the token note above) to catch a broken
+  result, for example code left unreachable by a nested `return`.
 
 ## Building from source
 
 ```bash
-mvn test      # runs the processor against in-memory sources
+mvn test      # runs the processor and the cleanup rewriter against in-memory sources
 mvn install   # installs the artifact into your local repository
 ```
 
